@@ -1,0 +1,8 @@
+# loop through images in crop image dataset
+# ID weeds vs crop vs soil using pretrained model to create standard scene representation 
+# If doing geometry experiment: geometrically determine which weed areas are large enough to extract without damage
+# If doing off the shelf image analysis: use pretrained image model to determine if weed areas are large enough to extract without damage
+# If using additional decision layer: feed geometry and/or image analysis results and get decision
+# Output coords for where weed exctraction would take place (use 2D coords for now)
+# Simulate robot extraction by making an interactive step where an image iwth the coords shown on it is presented to the user to annotate if the weed would be damaged or not and if the removable weeds have been removed
+# If using decision layer: store the feedback information associated with an image and decision and feed it back into the decision layer to fine tune it (or fine tune image model directly if applicable)
