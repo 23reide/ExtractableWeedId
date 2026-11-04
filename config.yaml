@@ -1,0 +1,25 @@
+# WeedBot runtime configuration
+# Swap backend between "groundtruth" (uses dataset annotation CSVs) and
+# "model" (runs the YOLOv8-nano-seg model on the raw image).
+backend: model
+
+# Path to YOLOv8 model weights. Ignored when backend is "groundtruth".
+# Use a relative path (resolved from the project root) or an absolute path.
+# Leave blank to use the pretrained COCO weights that ship with ultralytics.
+model_weights_path: "outputs/weights/best.pt"
+
+# Dataset root for the GroundTruthBackend (CropAndWeed prepared data directory).
+# Ignored when backend is "model".
+# "demo_dataset" or "cropandweed-dataset/data"
+data_root: "cropandweed-dataset/data"
+
+# CropAndWeed annotation variant — used by GroundTruthBackend.
+dataset_variant: "CropsOrWeed9"
+
+# Label map for ModelBackend: maps YOLOv8 class names (lowercased) to
+# "crop", "weed", or "soil". Any class not listed here is ignored.
+# These defaults target COCO class names that loosely correspond to plants.
+# Replace with your fine-tuned class names after retraining.
+label_map:
+  crop: crop
+  weed: weed

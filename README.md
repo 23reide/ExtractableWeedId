@@ -1,32 +1,28 @@
-# Weed Extraction Planning Platform (software-only prototype)
+# WeedBot — Weed Extraction Planning Platform (software-only prototype)
 
-A small, modular benchmark for testing weed-extraction planning algorithms on agricultural images. The current implementation includes:
+A modular, active-learning platform for testing weed-extraction planning algorithms on
+agricultural images. The system identifies weeds, crops, and soil; proposes 2D extraction
+coordinates; collects binary human feedback through a Streamlit UI; and fine-tunes a
+YOLOv8-nano-seg model on that feedback via a Google Colab notebook.
 
-- a dataset adapter for the **CropAndWeed** dataset;
-- a 2D geometric baseline using annotated plant bounding boxes and stem positions;
-- JSONL action-proposal export;
-- a Streamlit interface for human review/annotation;
-- append-only feedback storage in SQLite, with CSV export;
-- a tiny synthetic dataset so the workflow can be tested without downloading a research dataset.
+```
+Raw image
+  → Perception backend (ground-truth CSV  or  YOLOv8-nano-seg)
+  → Scene (weeds / crops / soil with bounding boxes + stem coords)
+  → Geometry planner (clearance-based approach path selection)
+  → Streamlit review UI (mask overlays + pull/no-pull decision)
+  → Binary human feedback (correct / incorrect / uncertain)
+  → SQLite feedback store
+  → Export: image patches + labels.csv
+  → Google Colab fine-tuning notebook → best.pt
+  → Swap weights in config.yaml → improved perception
+```
 
-> **Scope:** This prototype tests the *planner* against existing annotations. It does not yet run an off-the-shelf vision model on the raw image, physically simulate extraction, or validate that an action causes/avoids real damage. Those components are intentionally separate follow-on modules.
+---
 
-## 1. Dataset recommendation: CropAndWeed
+## 1. Dataset: CropAndWeed
 
-Use the official dataset repository: <https://github.com/cropandweed/cropandweed-dataset>.
-
-Why it fits this project:
-
-- It contains real-world agricultural images and labels for crop and weed categories.
-- The annotation CSVs contain individual plant boxes and stem coordinates (`Left, Top, Right, Bottom, Label ID, Stem X, Stem Y`), which are immediately useful for 2D approach planning.
-- It also provides semantic label masks and recording-condition metadata for future segmentation-based experiments.
-- The `CropsOrWeed9` variant groups plants into eight crop classes plus a weed class. This prototype uses IDs `0..7` as crops and `8` as weeds for that variant.
-
-The dataset is released for **non-commercial purposes**. Review its license and cite the original WACV 2023 paper before using it in research or publishing results.
-
-### Prepare the dataset
-
-Follow the dataset maintainers' setup instructions. In a terminal:
+The ground-truth backend uses the [CropAndWeed dataset](https://github.com/cropandweed/cropandweed-dataset).
 
 ```bash
 git clone https://github.com/cropandweed/cropandweed-dataset.git
@@ -35,9 +31,9 @@ python -m pip install requests tqdm numpy pillow
 python setup.py --data_root /absolute/path/to/cropandweed_data
 ```
 
-The maintainers' setup script downloads and extracts the image/annotation archives and creates mapped annotation variants. Use the resulting directory passed to `--data_root` below; it should contain folders similar to:
+The resulting directory should contain:
 
-```text
+```
 cropandweed_data/
 ├── images/
 ├── bboxes/
@@ -46,87 +42,147 @@ cropandweed_data/
     └── CropsOrWeed9/
 ```
 
-If the upstream setup script or directory layout changes, adjust the dataset path/layout rather than copying images or annotations into the project source tree. This adapter searches recursively for matching per-image CSV files under `bboxes/`.
+Update `data_root` in `config.yaml` to point to this directory.
 
-## 2. Install this project
+---
 
-From this project's directory:
+## 2. Install
 
-```bash
-python -m venv .venv
-# macOS/Linux
-source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
+```powershell
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 ```
 
-## 3. Run the included synthetic demo
+---
 
-The demo data is artificial; it is included only to test the code path and UI.
+## 3. Quick demo (no dataset download required)
 
-```bash
-python make_demo_data.py
+```powershell
+python make_demo_data.py          # generates demo_dataset/
 python -m unittest discover -s tests -v
-python run_planner.py --data-root ./demo_dataset --variant CropsOrWeed9 --max-images 2 --out outputs/demo_proposals.jsonl
 streamlit run app.py
 ```
 
-When the app opens, enter `demo_proposals.jsonl` in the **Proposal file in outputs** field. The app reads proposals from that file and loads the image and annotations referenced by each proposal. Generate a different proposal file with `run_planner.py` to review another dataset or planner configuration.
+In the app sidebar, enter `demo_dataset/images/demo_0001.png` in the path field.
 
-## 4. Export action proposals in batch
+---
 
-```bash
-python run_planner.py \
-  --data-root /absolute/path/to/cropandweed_data \
-  --variant CropsOrWeed9 \
-  --max-images 100 \
-  --gripper-radius-px 8 \
-  --safety-margin-px 3 \
-  --approach-length-px 55 \
-  --angle-step-deg 15 \
-  --out outputs/proposals.jsonl
+## 4. Configuration — config.yaml
+
+All runtime settings live in `config.yaml` at the project root.
+
+```yaml
+# "groundtruth" uses dataset annotation CSVs (fast, no model required)
+# "model" runs YOLOv8-nano-seg on the raw image
+backend: groundtruth
+
+# Path to fine-tuned weights (.pt file).
+# Leave blank to use pretrained COCO weights (placeholder until you retrain).
+model_weights_path: ""
+
+# Dataset root for the ground-truth backend.
+data_root: "demo_dataset"
+dataset_variant: "CropsOrWeed9"
+
+# Maps YOLOv8 class names → "crop" / "weed" / "soil".
+# Update this after retraining to match your trained class names.
+label_map:
+  crop: crop
+  weed: weed
+  potted plant: crop
+  grass: weed
 ```
 
-Each JSONL row represents one target weed, including the target base coordinates, selected approach angle, entry point, per-angle clearance estimates, planner configuration, and `attempt`/`skip` decision. All coordinates and distances are currently **pixels**. There is no camera calibration or physical scale.
+---
 
-## 5. Review and store feedback
+## 5. Active learning loop
 
-Launch the app with `streamlit run app.py`. Enter a proposal JSONL filename from the `outputs/` folder, select an action, examine the proposed approach, and annotate:
+### Step 1 — Review images and collect feedback
 
-- whether the selected plant is a valid weed target;
-- whether the approach looks safe for neighboring crops;
-- whether extraction appears plausible from the image;
-- whether neighboring crop damage is likely;
-- damage severity, confidence, and optional notes.
+```powershell
+streamlit run app.py
+```
 
-Each submission is appended to `outputs/feedback.sqlite`. The row retains the image path, complete proposal, selected planner, planner parameters, annotation labels, and timestamp. The **Export all saved feedback to CSV** tool writes `outputs/feedback_export.csv`.
+Open an image, inspect the pull/skip decision, then select **correct**, **incorrect**, or
+**uncertain** and click **Save feedback**.
 
-Use `uncertain` / `cannot_tell` when a static image is insufficient. These are visual assessments, not real extraction outcome measurements.
+### Step 2 — Export training data
 
-## 6. Geometry baseline
+Once you have enough labeled samples, open the **Active Learning / Retrain** expander in
+the sidebar and click **Retrain now**. This:
 
-For each annotated weed, the planner:
+- Crops 256 × 256 px patches around each labeled weed.
+- Writes `outputs/training_export/labels.csv`.
+- Zips everything to `outputs/training_export.zip`.
+- Displays step-by-step upload instructions.
 
-1. takes the annotated stem location as the 2D target (falls back to the bottom-centre of the plant box if unavailable);
-2. samples approach directions around the target;
-3. forms an approach segment from an entry point toward the target base;
-4. samples points along the path and measures their distance to each crop's axis-aligned bounding box;
-5. considers a path geometrically safe when its minimum estimated clearance is at least `gripper_radius_px + safety_margin_px` and the entry point is inside the image;
-6. proposes the safe direction with the largest clearance, or recommends `skip` if none pass.
+### Step 3 — Fine-tune in Google Colab
 
-This is deliberately a simple, explainable baseline. Bounding boxes can be over-conservative, and the current circular-tool approximation does not model a particular end-effector shape or arm kinematics. Improve it later with per-plant masks, configuration-space geometry, or a collision-checked robot planner.
+1. Upload `outputs/training_export.zip` to **Google Drive** → `WeedBot/`.
+2. Open `notebooks/finetune_colab.ipynb` in Google Colab
+   (Runtime → Change runtime type → T4 GPU for best speed).
+3. Update `DRIVE_ZIP_PATH` in Cell 1 and run all cells.
+4. Trained weights are saved to `WeedBot/weights/best.pt` on your Drive.
 
-## 7. Architecture and intended extension points
+### Step 4 — Swap weights and reload
 
-- **Perception adapter:** convert raw model detections/segmentation into the common scene representation. The current adapter supplies ground-truth boxes/stem points from dataset annotations so planner evaluation is isolated from perception quality.
-- **Planner interface:** replace `propose_for_scene` with geometry, pretrained image-model, or learned decision-layer implementations that emit the same action-proposal fields.
-- **Feedback/training:** export the SQLite labels to train/evaluate a decision layer. Split train/test data by image (or recording session) to avoid leakage from multiple actions on the same scene.
-- **Robot adapter:** convert an accepted image-space action into calibrated world coordinates and then robot-specific motion commands. Keep that separate from this planner.
+1. Download `best.pt` from Drive to (e.g.) `outputs/weights/best.pt`.
+2. Edit `config.yaml`:
+   ```yaml
+   backend: model
+   model_weights_path: outputs/weights/best.pt
+   label_map:
+     crop: crop
+     weed: weed
+   ```
+3. Restart the app — it picks up the new weights automatically.
+
+---
+
+## 6. Notes on the feedback label design
+
+The binary feedback ("correct" / "incorrect") conflates two independent signals into one:
+
+- **Was this actually a weed?** — a ground-truth fact about the image.
+- **Was the approach path safe?** — a judgment about the planner's geometry given the crop layout.
+
+A SKIP proposal can be "incorrect" because the weed was real but surrounded by crops (planner was too conservative), or because the plant wasn't a weed at all. An ATTEMPT proposal can be "incorrect" because the model misidentified the plant, or because the approach angle was bad. The current schema does not distinguish between these, which is a reasonable simplification for early-stage data collection but may cause noisy training signal if the dataset grows large.
+
+This somewhat complicates the decision to let annotations accumulate between model retrainings. A future improvement would be to add a `model_version` field to each feedback row (stamped from `config.yaml` at annotation time) so that labels from each training round can be identified and optionally filtered. This makes it possible to experiment with discarding annotations from early, low-quality model versions without losing the ability to reconstruct the full history.
+
+---
+
+## 7. Architecture and extension points
+
+| Layer | Current implementation | How to extend |
+|---|---|---|
+| **Perception** | `GroundTruthBackend` (CSV annotations) or `ModelBackend` (YOLOv8-nano-seg) | Implement `PerceptionBackend.predict()` in `weedbot/perception.py` |
+| **Planner** | `bbox_clearance_v1` geometric baseline | Replace `propose_for_scene` in `weedbot/geometry.py` |
+| **Feedback storage** | SQLite via `weedbot/storage.py` | Add columns; migration runs automatically at connect |
+| **Training export** | 256 × 256 px patches + `labels.csv` | Edit `weedbot/export_training_data.py` |
+| **Fine-tuning** | Colab notebook (`notebooks/finetune_colab.ipynb`) | Swap model architecture; add augmentation |
+| **Robot adapter** | Not implemented | Convert accepted image-space action to world coords + motion commands |
+
+---
+
+## 8. Tests
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+23 tests covering dataset loading, storage migration, perception interface, visualisation,
+export pipeline, and geometry planner.
+
+---
 
 ## Citation
 
-Please cite the dataset's original paper if you use CropAndWeed:
+If you use the CropAndWeed dataset, please cite:
 
-> Daniel Steininger, Andreas Trondl, Gerardus Croonen, Julia Simon, and Verena Widhalm. “The CropAndWeed Dataset: A Multi-Modal Learning Approach for Efficient Crop and Weed Manipulation.” *Proceedings of the IEEE/CVF Winter Conference on Applications of Computer Vision (WACV)*, 2023, pp. 3729–3738.
+> Daniel Steininger, Andreas Trondl, Gerardus Croonen, Julia Simon, and Verena Widhalm.
+> "The CropAndWeed Dataset: A Multi-Modal Learning Approach for Efficient Crop and Weed
+> Manipulation." *WACV 2023*, pp. 3729–3738.
 
 Dataset repository and license: <https://github.com/cropandweed/cropandweed-dataset>

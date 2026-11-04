@@ -1,4 +1,14 @@
 __pycache__/
 *.py[cod]
 .venv/
+venv/
 cropandweed-dataset/
+
+# Generated outputs — reproducible, not worth versioning
+outputs/training_export/
+outputs/training_export.zip
+outputs/retrain_log.json
+outputs/_tmp_uploads/
+
+# Keep the outputs/ directory itself tracked
+!outputs/.gitkeep
